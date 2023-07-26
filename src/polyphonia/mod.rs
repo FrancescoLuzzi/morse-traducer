@@ -1,5 +1,6 @@
 //public modules
 pub mod amplitude;
+pub mod envelope;
 pub mod notable_notes;
 pub mod note;
 
