@@ -1,6 +1,7 @@
 use super::Amplitude;
+use std::error::Error;
 
-use std::{f32::consts::E, ops::Index};
+use std::f32::consts::E;
 
 type Interpolation = fn(f32, f32, f32, f32) -> f32;
 
@@ -10,6 +11,20 @@ enum Interval {
     Decay2,
     Sustain,
     Release,
+}
+
+impl TryFrom<usize> for Interval {
+    type Error = String;
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Attack),
+            1 => Ok(Self::Decay1),
+            2 => Ok(Self::Decay2),
+            3 => Ok(Self::Sustain),
+            4 => Ok(Self::Release),
+            def => Err(format!("Interval out of bound {def}")),
+        }
+    }
 }
 
 // all interpolation functions are normalized `0->duration`
@@ -66,7 +81,7 @@ struct Envelope {
     sustain: Option<EnvelopeInverval>,
     release_time: Option<f32>,
     release: EnvelopeInverval,
-    timing_mappings: Vec<Option<f32>>,
+    timing_mappings: [Option<f32>; 4],
 }
 
 impl Envelope {
@@ -77,23 +92,22 @@ impl Envelope {
         sustain: Option<EnvelopeInverval>,
         release: EnvelopeInverval,
     ) -> Self {
-        let mut timings = Vec::new();
+        // - Attack(0)  -> 0
+        // - Decay1(1)  -> sum of prev duration 
+        // - Decay2(2)  -> sum of prev duration
+        // - Sustain(2) -> sum of prev duration
+        let mut timings: [Option<f32>; 4] = [None;4];
         let mut tot_duration: f32 = 0_f32;
+        timings[Interval::Attack as usize] = Some(tot_duration);
         tot_duration += attack.duration;
-        timings.push(Some(tot_duration));
+        timings[Interval::Decay1 as usize] = Some(tot_duration);
         tot_duration += decay1.duration;
-        timings.push(Some(tot_duration));
         if let Some(dec2) = &decay2 {
+            timings[Interval::Decay2 as usize] = Some(tot_duration);
             tot_duration += dec2.duration;
-            timings.push(Some(tot_duration));
-        } else {
-            timings.push(None);
         }
-        if let Some(sus) = &sustain {
-            tot_duration += sus.duration;
-            timings.push(Some(tot_duration));
-        } else {
-            timings.push(None);
+        if sustain.is_some() {
+            timings[Interval::Sustain as usize] = Some(tot_duration);
         }
         Envelope {
             attack,
@@ -114,8 +128,8 @@ impl Envelope {
         self.release_time = Some(release_time);
     }
 
-    fn get_interval_envelope(&self, index: Interval) -> Option<&EnvelopeInverval> {
-        match index {
+    fn get_interval_envelope(&self, interval: Interval) -> Option<&EnvelopeInverval> {
+        match interval {
             Interval::Attack => Some(&self.attack),
             Interval::Decay1 => Some(&self.decay1),
             Interval::Decay2 => self.decay2.as_ref(),
@@ -124,11 +138,36 @@ impl Envelope {
         }
     }
 
-    pub fn get_amplitude_scaling(&self, step: f32) -> f32 {
+    pub fn get_amplitude_scaling(&self, step: f32) -> Result<f32, Box<dyn Error>> {
         if let Some(release_time) = self.release_time {
             if step >= release_time {
-                return self.release.interpolate(step - release_time);
+                return Ok(self.release.interpolate(step - release_time));
             }
         };
+        // get last interval where step is less that
+        let (interval, offset) = self
+            .timing_mappings
+            .iter()
+            .enumerate()
+            .filter_map(|(indx, timing)| {
+                if let Some(timing) = timing {
+                    if step < *timing {
+                        Some((indx, *timing))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .last()
+            .unwrap();
+        let interval: Interval = interval.try_into()?;
+        let interval_envelope = self.get_interval_envelope(interval);
+        if let Some(interval_envelope) = interval_envelope {
+            Ok(interval_envelope.interpolate(step - offset))
+        } else {
+            Err(format!("Internal envelope not found for given step={step}").into())
+        }
     }
 }
