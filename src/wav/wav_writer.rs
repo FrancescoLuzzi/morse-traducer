@@ -1,7 +1,6 @@
 use crate::polyphonia::SAMPLE_RATE;
 use std::{
     borrow::Borrow,
-    cell::RefMut,
     io::{self, Seek, SeekFrom, Write},
     marker::PhantomData,
 };
@@ -176,9 +175,8 @@ where
 }
 
 impl<'a, T: WavOutBuffer> WavWriter<'a, T, Initiated> {
-    pub fn close(mut self) -> io::Result<()> {
+    pub fn close(self) -> io::Result<()> {
         self.out_buffer.flush()?;
-        println!("{:?}", self.wav_opts);
         let last_pos = self.out_buffer.stream_position()?;
         let offset: i64 = (last_pos - self.header_position).try_into().unwrap();
         self.out_buffer.seek(SeekFrom::Current(-offset))?;
@@ -214,46 +212,6 @@ impl<'a, T: WavOutBuffer> Write for WavWriter<'a, T, Initiated> {
     fn flush(&mut self) -> io::Result<()> {
         self.out_buffer.flush()
     }
-}
-
-pub fn write_wav(data: Vec<i16>, sample_rate: u32, writer: &mut dyn Write) -> io::Result<()> {
-    fn make_bytes<T>(number: T) -> Vec<u8>
-    where
-        T: Into<u32>,
-    {
-        let number: u32 = number.into();
-        let mut b: Vec<u8> = Vec::new();
-        for i in 0..std::mem::size_of::<T>() {
-            b.push(((number >> (8 * i)) & 0xff) as u8);
-        }
-        b
-    }
-    let nsamples = data.len() * 2;
-    writer.write_all(b"RIFF")?;
-    let rsize = make_bytes::<u32>(20 + nsamples as u32); // added 20 for the rest of the header
-    writer.write_all(&rsize)?; // WAVE chunk size
-
-    // WAVE chunk
-    writer.write_all(b"WAVE")?;
-
-    // fmt chunk
-    writer.write_all(b"fmt ")?;
-    writer.write_all(&make_bytes::<u32>(16))?; // fmt chunk size
-    writer.write_all(&make_bytes::<u16>(1))?; // format code (PCM)
-    writer.write_all(&make_bytes::<u16>(1))?; // number of channels
-    writer.write_all(&make_bytes::<u32>(sample_rate))?; // sample rate
-    writer.write_all(&make_bytes::<u32>(sample_rate))?; // data rate
-    writer.write_all(&make_bytes::<u16>(2))?; // block size
-    writer.write_all(&make_bytes::<u16>(16))?; // bits per sample
-
-    // data chunk
-    writer.write_all(b"data")?;
-    writer.write_all(&make_bytes::<u32>(nsamples as u32))?; // data chunk size
-    for half_word in data {
-        writer.write_all(&make_bytes(half_word as u16))?;
-    }
-
-    writer.flush()
 }
 
 #[test]
