@@ -1,13 +1,9 @@
 use crate::parser::{MorseCommand, MorseTraductionType};
 use crate::polyphonia::SAMPLE_RATE;
-use crate::utils::{get_reader, get_writer};
-use crate::wav::write_wav;
+use crate::wav::wav_writer::{WavBuilder, WavOutBuffer};
 use crate::Letter;
 use std::cell::RefCell;
-use std::default::Default;
 use std::error::Error;
-use std::io::{BufRead, Write};
-use std::ops::DerefMut;
 use std::rc::Rc;
 use std::str::{self, FromStr};
 
@@ -23,21 +19,23 @@ pub trait MorseTranslator<T, W, R> {
     fn decode(raw_data: T) -> W;
 }
 
-pub struct StreamedMorseTranslator<'a> {
+pub struct StreamedMorseTranslator<T: WavOutBuffer> {
     // idea, create struct AudioMorseTranslation for audio implementation
-    // create struct OptionMorseTranslation with functions:
-    // - in_file(Option<&str>)  -> using get_reader
-    // - out_file(Option<&str>) -> using get_writer
+    // create struct MorseTranslation with functions:
+    // - in_file(&str)  -> using get_reader
+    // - out_file(&str) -> using get_writer
     // - traduction_type(MorseTraductionType)
     // - traduction_options(MorseCommand)
     // this patter will create and use a StreamedMorseTranslator
     // or an AudioMorseTranslation trasparently
-    input_stream: Option<Vec<String>>,
-    pub output_stream: Option<Rc<RefCell<dyn Write + 'a>>>,
+    input_stream: Vec<String>,
+    pub output_stream: Rc<RefCell<T>>,
     pub traduction_type: MorseTraductionType,
 }
 
-impl<'l> MorseTranslator<&str, Vec<Letter<'l>>, ()> for StreamedMorseTranslator<'_> {
+impl<'l, T: WavOutBuffer> MorseTranslator<&str, Vec<Letter<'l>>, ()>
+    for StreamedMorseTranslator<T>
+{
     fn translate(&mut self, command: MorseCommand) -> Result<(), Box<dyn Error>> {
         match self.traduction_type {
             MorseTraductionType::Text => self.translate_to_text(command),
@@ -51,23 +49,15 @@ impl<'l> MorseTranslator<&str, Vec<Letter<'l>>, ()> for StreamedMorseTranslator<
             MorseCommand::Decode => Self::decode,
         };
 
-        let translated_lines = self
-            .input_stream
-            .as_ref()
-            .expect("Input stream not initialized, failing.")
-            .iter()
-            .flat_map(|line| read_cmd(line));
-        let mut output = self
-            .output_stream
-            .as_ref()
-            .expect("Output stream not inizialized, failing.")
-            .borrow_mut();
-        write_wav(
-            Letter::concat_audio(translated_lines),
-            SAMPLE_RATE,
-            output.deref_mut(),
-        )?;
-        output.flush()?;
+        let translated_lines = self.input_stream.iter().flat_map(|line| read_cmd(line));
+        let mut output = self.output_stream.as_ref().borrow_mut();
+        let wav = WavBuilder::new()
+            .sample_rate(SAMPLE_RATE)
+            .set_output(&mut *output);
+        let mut wav = wav.init()?;
+        wav.write_half_words(&Letter::concat_audio(translated_lines))?;
+        // Letter::concat_audio(translated_lines),
+        wav.close()?;
         Ok(())
     }
 
@@ -82,18 +72,9 @@ impl<'l> MorseTranslator<&str, Vec<Letter<'l>>, ()> for StreamedMorseTranslator<
             MorseCommand::Decode => Letter::concat_text,
         };
 
-        let translated_lines = self
-            .input_stream
-            .as_ref()
-            .expect("Input stream not initialized, failing.")
-            .iter()
-            .map(|line| read_cmd(line));
+        let translated_lines = self.input_stream.iter().map(|line| read_cmd(line));
 
-        let mut output = self
-            .output_stream
-            .as_ref()
-            .expect("Output stream not inizialized, failing.")
-            .borrow_mut();
+        let mut output = self.output_stream.as_ref().borrow_mut();
         let last_index = translated_lines.len() - 1;
         for (i, line) in translated_lines.map(translate_cmd).enumerate() {
             output.write_all(&line)?;
@@ -126,48 +107,55 @@ impl<'l> MorseTranslator<&str, Vec<Letter<'l>>, ()> for StreamedMorseTranslator<
     }
 }
 
-impl Default for StreamedMorseTranslator<'_> {
-    fn default() -> Self {
-        Self::new()
-    }
+pub struct TranslatorBuilder<T: WavOutBuffer> {
+    traduction_type: MorseTraductionType,
+    input_stream: Option<Vec<String>>,
+    output_stream: Option<Rc<RefCell<T>>>,
 }
 
-impl<'a> StreamedMorseTranslator<'a> {
+impl<T: WavOutBuffer> TranslatorBuilder<T> {
     pub fn new() -> Self {
-        StreamedMorseTranslator {
-            input_stream: None,
-            output_stream: None,
-            traduction_type: MorseTraductionType::Text,
-        }
+        Default::default()
     }
 
-    pub fn in_stream(&mut self, input_stream: Vec<String>) -> &mut Self {
+    pub fn input_stream(&mut self, input_stream: Vec<String>) -> &mut Self {
         self.input_stream = Some(input_stream);
         self
     }
 
-    pub fn in_file(&mut self, input_filename: &str) -> &mut Self {
-        self.input_stream = Some(
-            get_reader(input_filename)
-                .lines()
-                .flatten()
-                .collect::<Vec<String>>(),
-        );
-        self
-    }
-
-    pub fn out_stream(&mut self, out_stream: Rc<RefCell<dyn Write>>) -> &mut Self {
+    pub fn output_stream(&mut self, out_stream: Rc<RefCell<T>>) -> &mut Self {
         self.output_stream = Some(out_stream);
-        self
-    }
-
-    pub fn out_file(&mut self, output_filename: &str) -> &mut Self {
-        self.output_stream = Some(Rc::new(RefCell::new(get_writer(output_filename))));
         self
     }
 
     pub fn traduction_type(&mut self, traduction_type: MorseTraductionType) -> &mut Self {
         self.traduction_type = traduction_type;
         self
+    }
+
+    pub fn build_streamed(&self) -> Result<StreamedMorseTranslator<T>, String> {
+        Ok(StreamedMorseTranslator {
+            input_stream: self
+                .input_stream
+                .as_ref()
+                .expect("input_stream not set")
+                .clone(),
+            output_stream: self
+                .output_stream
+                .as_ref()
+                .expect("output_stream not set")
+                .clone(),
+            traduction_type: self.traduction_type.clone(),
+        })
+    }
+}
+
+impl<T: WavOutBuffer> Default for TranslatorBuilder<T> {
+    fn default() -> Self {
+        TranslatorBuilder {
+            input_stream: None,
+            output_stream: None,
+            traduction_type: MorseTraductionType::Text,
+        }
     }
 }
