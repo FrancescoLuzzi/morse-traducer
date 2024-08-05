@@ -146,6 +146,8 @@ where
     }
 }
 
+// behaviour before initiating the writer
+// functions available are `new` and `init`
 impl<'a, T> WavWriter<'a, T, Created>
 where
     T: WavOutBuffer,
@@ -158,12 +160,7 @@ where
             status: PhantomData,
         }
     }
-}
 
-impl<'a, T> WavWriter<'a, T, Created>
-where
-    T: WavOutBuffer,
-{
     pub fn init(mut self) -> io::Result<WavWriter<'a, T, Initiated>> {
         self.header_position = self.out_buffer.stream_position()?;
         let header: [u8; HEADER_SIZE] = self.wav_opts.borrow().into();
@@ -174,7 +171,16 @@ where
     }
 }
 
+// behaviour after initiating the writer
+// functions available are `write_half_words` and `close`
 impl<'a, T: WavOutBuffer> WavWriter<'a, T, Initiated> {
+    pub fn write_half_words(&mut self, data: &[i16]) -> io::Result<()> {
+        for half_word in data {
+            self.write_all(&(*half_word as u16).to_le_bytes())?;
+        }
+        Ok(())
+    }
+
     pub fn close(self) -> io::Result<()> {
         self.out_buffer.flush()?;
         let last_pos = self.out_buffer.stream_position()?;
@@ -186,15 +192,9 @@ impl<'a, T: WavOutBuffer> WavWriter<'a, T, Initiated> {
         self.out_buffer.flush()?;
         Ok(())
     }
-
-    pub fn write_half_words(&mut self, data: &[i16]) -> io::Result<()> {
-        for half_word in data {
-            self.write_all(&(*half_word as u16).to_le_bytes())?;
-        }
-        Ok(())
-    }
 }
 
+// implemented `Write` after initiating the writer
 impl<'a, T: WavOutBuffer> Write for WavWriter<'a, T, Initiated> {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         let bytes_written = self.out_buffer.write(data)?;
